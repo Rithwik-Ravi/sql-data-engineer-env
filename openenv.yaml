@@ -1,0 +1,20 @@
+name: OpenEnv-SQL-Data-Engineer
+version: 1.0.0
+description: >
+  A real-world OpenEnv environment simulating a Database Administrator/Data Engineer. 
+  The agent must interact with a live SQLite mock database using SQL commands to perform data extraction, data cleaning, and schema normalization.
+entrypoint: env:app
+models:
+  action: models:Action
+  observation: models:Observation
+  reward: models:Reward
+tags:
+  - database
+  - sql
+  - data-engineering
+  - structured-data
+  - real-world
+port: 7860
+dockerfile: Dockerfile
+environment_vars:
+  - HF_TOKEN
