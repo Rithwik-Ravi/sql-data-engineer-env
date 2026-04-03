@@ -17,8 +17,9 @@ dependencies = [
     "pandas"
 ]
 
-[tool.setuptools]
-packages = ["."]
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["server*"]
 
 [project.scripts]
 server = "server.app:main"

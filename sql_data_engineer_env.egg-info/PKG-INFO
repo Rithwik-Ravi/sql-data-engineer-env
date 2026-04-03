@@ -1,0 +1,135 @@
+Metadata-Version: 2.4
+Name: sql-data-engineer-env
+Version: 0.1.0
+Summary: A real-world SQL data engineering environment for agent evaluation.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: openenv-core
+Requires-Dist: fastapi
+Requires-Dist: uvicorn
+Requires-Dist: pydantic
+Requires-Dist: openai
+Requires-Dist: pandas
+
+---
+title: SQL Data Engineer Environment
+emoji: 🗄️
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+pinned: false
+app_port: 7860
+---
+# OpenEnv: SQL Data Engineer Environment
+
+Welcome to the **SQL Data Engineer Environment**—a robust, fully-compliant baseline environment built for the Meta OpenEnv Hackathon. This project tests an AI agent's ability to natively interact with a live SQL engine to perform pragmatic data extraction, cleansing, and complex schema normalization tasks.
+
+## Environment Description & Motivation
+
+### Why SQL Data Engineering?
+The industry needs reliable agents that can act as backend developers, DB administrators, and data engineers. While many environments focus on web browsing or gaming, manipulating relational databases is a high-value, real-world task. This environment simulates authentic obstacles developers face:
+- Analyzing undocumented database schemas.
+- Cleansing noisy string data into strict scalar types.
+- Restructuring and normalizing flat tables into relational architectures while rigorously preserving foreign-key constraints.
+
+It presents an excellent metric to gauge an LLM's structured reasoning and precise SQL generation capabilities.
+
+---
+
+## Space Definitions
+
+The environment adheres strictly to the OpenEnv Pydantic specification, enabling seamless API integration.
+
+### Observation Space
+The observation space is tailored to provide dense context while remaining token-efficient:
+- `goal` (string): The explicit task prompt/requirement dictating what the agent must achieve.
+- `schema_dump` (string | null): The current DDL representing all tables and views in the DB (schema definition). Sent back only when the schema dynamically changes or the state is stable.
+- `result` (string): The standard output of the previously executed query (capped to 10 rows for SELECTs) or a clear `rowcount` confirmation for INSERTs/UPDATEs.
+- `last_action_error` (boolean): Flag indicating if the previous SQL Action threw a syntax or logic engine error.
+- `step` (integer): The current episode step tally.
+
+### Action Space
+- `action_str` (string): The agent must return a JSON dictionary containing a single, syntactically correct SQLite query to be executed against the backend state.
+
+---
+
+## Tasks & Graders
+
+Each episode challenges the agent with one of 3 tasks featuring deterministic OpenEnv graders scoring between `0.0` and `1.0`.
+
+#### 1. Easy: Data Extraction (View Creation)
+- **Goal**: Read a `customers` table, filter out metrics > 1000.0, and construct a targeted `high_value_customers` SQL View.
+- **Difficulty**: Easy. Tests basic SELECT syntax and DDL proficiency.
+- **Grader**: Validates if the correct view exists in `sqlite_master`, assigns `0.5` points. Exact row and content matching grants the remaining `+0.5`.
+
+#### 2. Medium: Data Cleaning
+- **Goal**: Coerce a messy `products` table. The agent must standardize categorical string sizes (e.g., converting 'ELEC' to 'ELECTRONICS') and extract numeric floats from dirty string pricing (e.g., '$85.00' -> `85.0`) into a new generated float column.
+- **Difficulty**: Medium. Tests native string pattern matching and targeted UPDATE pipelines.
+- **Grader**: Adding the column yields `0.3` points. Correct categorical string mapping grants up to `0.3`, and correctly extracted float prices yield `0.4` respectively.
+
+#### 3. Hard: Schema Normalization
+- **Goal**: Normalize a completely flat `hospital_records` repository into a structured 3-table format (`patients`, `doctors`, `appointments`). Data must be completely migrated and bound by Primary/Foreign key constraints.
+- **Difficulty**: Hard. Tests multi-step schema architectural reasoning and safe data-migration pipelines.
+- **Grader**: Validating table signatures issues `0.1` per table. Proper data counts yield `0.1` each, and if a relational JOIN across the new DB perfectly rebuilds the original flat map, the final `0.3` is awarded.
+
+### The Dense Reward Function
+Scores are completely dense over the episode lifecycle. 
+At `step(action)`, the grader executes. The mathematical reward signal is continuous: 
+`Reward = (Current_Score - Previous_Score)`. 
+*Note: A `-0.05` penalty is actively applied when `last_action_error` triggers, strongly discouraging hallucinated or malformed SQL loops.*
+
+---
+
+## Local Setup & Usage
+
+To validate the OpenEnv schema, install the framework, and run the OpenAI-compatible baseline script locally:
+
+```bash
+# 1. Clone the repository and navigate inside
+git clone <your-repo-url>
+cd OpenEnv-SQL-Data-Engineer
+
+# 2. Setup standard Python virtual environment
+python -m venv venv
+source venv/bin/activate  # Or `venv\Scripts\activate` on Windows
+
+# 3. Install core dependencies (FastAPI, Pydantic, OpenAI, OpenEnv)
+pip install openenv openenv-core openai pydantic fastapi uvicorn requests
+
+# 4. Verify OpenEnv schema compliance locally
+openenv validate
+
+# 5. Execute the baseline AI Agent (make sure to set your key)
+export OPENAI_API_KEY="your-api-key"
+export MODEL_NAME="gpt-4o"
+python inference.py
+```
+
+---
+
+## Deployment Instructions
+
+### Docker Container Build
+The environment provides a native Hugging Face structured `Dockerfile` configured to launch on port 7860 as an unprivileged user.
+
+```bash
+docker build -t openenv-sql .
+docker run -p 7860:7860 openenv-sql
+```
+
+### Deploying to Hugging Face Spaces
+To finalize your Hackathon deployment and spin up the live inference API:
+1. First, create a new minimal **Docker Space** inside Hugging Face.
+2. Ensure you add `HF_TOKEN` globally inside your HF Space Repository secrets.
+3. Push this directory to the Space via git:
+   ```bash
+   git remote add space https://huggingface.co/spaces/<your-username>/<your-space-name>
+   git push space main
+   ```
+4. The environment URL will naturally respond to ping checks and `/reset` on HF endpoints.
+
+
+### Baseline Scores (Llama-3-8B-Instruct)
+- **Easy Task:** 1.0 (Passed)
+- **Medium Task:** 0.62 (Partial Success - struggled with complex string casting)
+- **Hard Task:** 0.2 (Challenging - requires higher reasoning/longer context)
