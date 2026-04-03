@@ -5,9 +5,10 @@ from server.models import Action, BrowserGymAction # using our local Action mode
 from server.app import env_instance as env
 
 # Environment Configuration
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME = os.environ.get("MODEL_NAME", "gpt-4o")
-API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("HF_TOKEN", "")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o")
+HF_TOKEN = os.getenv("HF_TOKEN")
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 
 MAX_STEPS = 15
 TEMPERATURE = 0.2
@@ -47,7 +48,6 @@ def build_user_prompt(step: int, observation, history: list) -> str:
     return prompt
 
 def parse_model_action(response_text: str) -> str:
-    # Try to parse JSON
     text = response_text.strip()
     if text.startswith("```json"): text = text[7:]
     if text.startswith("```"): text = text[3:]
@@ -58,35 +58,41 @@ def parse_model_action(response_text: str) -> str:
         data = json.loads(text)
         return data.get("action_str", "SELECT 1;")
     except json.JSONDecodeError:
-        # Fallback if model doesn't follow json format correctly
         return text
 
-def run_task(task_id: int):
-    print(f"\n{'='*50}\nStarting Task {task_id}\n{'='*50}")
-    
+def run_task(task_id: int):    
     client = OpenAI(
         base_url=API_BASE_URL,
-        api_key=API_KEY
+        api_key=HF_TOKEN
     )
     
     history = []
+    rewards = []
     
-    # Using the local env object wrapper
-    result = env.reset(task_id=task_id)
-    observation = result.observation
-    print(f"Episode goal: {observation.goal}\n")
+    try:
+        result = env.reset(task_id=task_id)
+        observation = result.observation
+        final_score = result.info.get("initial_score", 0.0)
+    except Exception as e:
+        print(f"[START] task={task_id} env=sql-data-engineer-env model={MODEL_NAME}")
+        print(f"[END] success=false steps=0 score=0.00 rewards=")
+        return 0.0
+
+    print(f"[START] task={task_id} env=sql-data-engineer-env model={MODEL_NAME}")
+
+    done = False
+    step_count = 0
 
     for step in range(1, MAX_STEPS + 1):
-        # We handle done from the step result, but for initial step we check just in case
+        step_count = step
         user_prompt = build_user_prompt(step, observation, history)
-        
-        # print("PROMPT:", user_prompt)
         
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": user_prompt},
         ]
 
+        action_str = ""
         try:
             completion = client.chat.completions.create(
                 model=MODEL_NAME,
@@ -94,51 +100,52 @@ def run_task(task_id: int):
                 temperature=TEMPERATURE,
                 max_tokens=MAX_TOKENS,
                 stream=False,
-                response_format={"type": "json_object"} # enforce json output
+                response_format={"type": "json_object"} 
             )
             response_text = completion.choices[0].message.content or ""
             action_str = parse_model_action(response_text)
         except Exception as exc: 
-            failure_msg = f"Model request failed ({exc}). Using fallback action."
-            print(failure_msg)
             action_str = "SELECT 1;"
 
-        print(f"Step {step}: model suggested -> {action_str[:100]}...")
+        try:
+            step_result = env.step(BrowserGymAction(action_str=action_str))
+            observation = step_result.observation
+            reward = step_result.reward
+            done = step_result.done
+            final_score = step_result.info.get("current_score", 0.0)
+            
+            if observation.last_action_error:
+                error_msg = observation.result.replace('\n', ' ')
+            else:
+                error_msg = "null"
+        except Exception as e:
+            reward = 0.0
+            done = True
+            error_msg = str(e).replace('\n', ' ')
 
-        # Step the environment
-        step_result = env.step(BrowserGymAction(action_str=action_str))
-        observation = step_result.observation
-        reward = step_result.reward
-        done = step_result.done
-
-        error_flag = " ERROR" if observation.last_action_error else ""
-        history_line = f"Step {step}: {action_str[:50]}... -> reward {reward:+.2f}{error_flag}"
-        history.append(history_line)
+        rewards.append(f"{reward:.2f}")
         
-        print(f"  Reward: {reward:+.2f} | Done: {done} | Last action error: {observation.last_action_error}")
+        done_str = "true" if done else "false"
+        safe_action = action_str.replace('\n', ' ')
+        err_out = f'"{error_msg}"' if error_msg != "null" else "null"
+        
+        print(f"[STEP] step={step} action=\"{safe_action}\" reward={reward:.2f} done={done_str} error={err_out}")
+
+        history_line = f"Step {step}: {safe_action[:50]}... -> reward {reward:+.2f}"
+        history.append(history_line)
 
         if done:
-            final_score = step_result.info.get("current_score", 0.0)
-            print(f"\nEpisode complete! Final Score: {final_score}/1.0")
             break
-    else:
-        final_score = env.state().get("current_score", 0.0)
-        print(f"\nReached max steps ({MAX_STEPS}). Final Score: {final_score}/1.0")
-        
+
+    success_str = "true" if final_score >= 1.0 else "false"
+    rewards_str = ",".join(rewards)
+    print(f"[END] success={success_str} steps={step_count} score={final_score:.2f} rewards={rewards_str}")
+    
     return final_score
 
-def main():
-    print("Testing OpenEnv Data Engineer Inference Baseline")
-    
-    if not API_KEY:
-        print("Warning: API_KEY/HF_TOKEN not set. Will likely fail unless local LLM.")
-
-    scores = {}
+def main():    
     for task_id in [1, 2, 3]:
-        score = run_task(task_id)
-        scores[f"Task_{task_id}"] = score
-        
-    print(f"\n{'*'*50}\nEVALUATION COMPLETE\n{scores}\n{'*'*50}")
+        run_task(task_id)
 
 if __name__ == "__main__":
     main()
