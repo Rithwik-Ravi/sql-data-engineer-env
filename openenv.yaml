@@ -18,3 +18,10 @@ port: 7860
 dockerfile: Dockerfile
 environment_vars:
   - HF_TOKEN
+  - AGENT_API_KEY
+
+isolation:
+  network: none
+  resource_limits:
+    cpu_cores: 1.0
+    memory_gb: 1.0

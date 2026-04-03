@@ -1,8 +1,9 @@
 FROM python:3.10-slim
 
-# Creates a non-root user with an explicit UID required by Hugging Face Spaces
-RUN useradd -m -u 1000 user
-USER user
+# Creates a non-root user with an explicit UID and GID required by Hugging Face Spaces
+RUN groupadd -g 1000 user && \
+    useradd -m -u 1000 -g 1000 user
+USER 1000:1000
 
 # Set environment variables
 ENV HOME=/home/user \

@@ -1,14 +1,81 @@
 import sqlite3
 import os
+import logging
+import re
+import time
+import asyncio
 from typing import Dict, Any, Optional
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request, Depends
+from fastapi.responses import JSONResponse
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import uvicorn
 
 from .models import Action, Observation, Reward, StepResult, ResetResult
 from .tasks import TASKS
 
+# -- Security & Telemetry Setup --
+class SecretMaskingFormatter(logging.Formatter):
+    def format(self, record):
+        msg = super().format(record)
+        msg = re.sub(r'Bearer\s+[A-Za-z0-9_\-]+', 'Bearer ***', msg)
+        hf_token = os.environ.get("HF_TOKEN")
+        if hf_token and hf_token in msg:
+            msg = msg.replace(hf_token, "***")
+        return msg
+
+logger = logging.getLogger("agent_audit")
+logger.setLevel(logging.INFO)
+ch = logging.StreamHandler()
+ch.setFormatter(SecretMaskingFormatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(ch)
+
+security = HTTPBearer()
+AGENT_API_KEY = os.environ.get("AGENT_API_KEY", "test-agent-key")
+
+class TokenBucket:
+    def __init__(self, capacity: int, fill_rate: float):
+        self.capacity = capacity
+        self.fill_rate = fill_rate
+        self.tokens = capacity
+        self.last_fill = time.time()
+
+    def consume(self, tokens: int = 1) -> bool:
+        now = time.time()
+        self.tokens = min(self.capacity, self.tokens + (now - self.last_fill) * self.fill_rate)
+        self.last_fill = now
+        if self.tokens >= tokens:
+            self.tokens -= tokens
+            return True
+        return False
+
+rate_limiter = TokenBucket(capacity=50, fill_rate=50.0/60.0)
+
+async def verify_auth_and_rate_limit(credentials: HTTPAuthorizationCredentials = Depends(security)):
+    if credentials.credentials != AGENT_API_KEY:
+        raise HTTPException(status_code=401, detail="Invalid API Key")
+    if not rate_limiter.consume(1):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+    return credentials.credentials
+
 app = FastAPI(title="OpenEnv SQL Data Engineer")
+db_semaphore = asyncio.Semaphore(5)
+
+@app.middleware("http")
+async def security_middleware(request: Request, call_next):
+    # Max payload limit ~ 1MB
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > 1048576:
+        return JSONResponse(status_code=413, content={"error": "Payload Too Large"})
+    
+    try:
+        response = await asyncio.wait_for(call_next(request), timeout=10.0)
+        return response
+    except asyncio.TimeoutError:
+        return JSONResponse(status_code=504, content={"error": "Gateway Timeout"})
+    except Exception as e:
+        logger.error(f"Unhandled exception: {str(e)}")
+        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 class SQLEnvironment:
     def __init__(self):
@@ -50,6 +117,24 @@ class SQLEnvironment:
         self.step_count = 0
         self.current_score = 0.0
         
+        # Security: 5 second timeout on queries
+        self.query_start_time = 0
+        def progress_handler():
+            if time.time() - self.query_start_time > 5.0:
+                return 1 # Abort query
+            return 0
+        self.conn.set_progress_handler(progress_handler, 1000)
+
+        # Security: Simple Authorizer to block DROP TABLE and explicit destructive system mods
+        # We allow standard DDL since the agent gets asked to CREATE VIEW, but restrict DROP
+        def authorizer(action_code, arg1, arg2, dbname, source):
+            # 11 = SQLITE_DROP_TABLE, 16 = SQLITE_DROP_VIEW
+            # 17 = SQLITE_ATTACH (blocks ATTACH DATABASE)
+            if action_code in (11, 16, 17):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        self.conn.set_authorizer(authorizer)
+        
         # Initialize standard SQLite settings
         self.conn.execute("PRAGMA foreign_keys = ON")
         
@@ -82,10 +167,17 @@ class SQLEnvironment:
         try:
             c = self.conn.cursor()
             query = action.action_str.strip()
-            # Basic mitigation of forbidden queries just in case (though we're in mock)
+            
+            # Injection Mitigations at parser level
+            blocked_patterns = [r"(?i)DROP\s+DATABASE", r"(?i)pg_sleep", r"(?i)randomblob", r"(?i)ATTACH\s+DATABASE"]
+            for p in blocked_patterns:
+                if re.search(p, query):
+                    raise Exception(f"Blocked destructive command pattern detected: {p}")
+                    
             if query.upper().startswith("DROP TABLE sqlite_"):
                 raise Exception("Cannot modify system tables.")
                 
+            self.query_start_time = time.time()
             c.execute(query)
             
             if query.upper().startswith("SELECT") or query.upper().startswith("PRAGMA"):
@@ -154,22 +246,33 @@ class ResetRequest(BaseModel):
     task_id: int = 1
 
 @app.post("/reset", response_model=ResetResult)
-def reset(req: ResetRequest):
-    try:
-        return env_instance.reset(task_id=req.task_id)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+async def reset(req: ResetRequest, token: str = Depends(verify_auth_and_rate_limit)):
+    async with db_semaphore:
+        try:
+            logger.info(f"Resetting environment for task_id: {req.task_id}")
+            return env_instance.reset(task_id=req.task_id)
+        except Exception as e:
+            logger.error(f"Reset Error: {str(e)}")
+            raise HTTPException(status_code=400, detail="Error during reset")
 
 @app.post("/step", response_model=StepResult)
-def step(action: Action):
-    try:
-        return env_instance.step(action)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+async def step(action: Action, token: str = Depends(verify_auth_and_rate_limit)):
+    async with db_semaphore:
+        try:
+            start_t = time.time()
+            logger.info(f"Attempting query: {action.action_str}")
+            res = env_instance.step(action)
+            duration = time.time() - start_t
+            logger.info(f"Query completed in {duration:.3f}s. Error state: {res.observation.last_action_error}")
+            return res
+        except Exception as e:
+            logger.error(f"Step Error: {str(e)}")
+            raise HTTPException(status_code=400, detail="Error executing SQL step")
 
 @app.get("/state")
-def state():
-    return env_instance.state()
+async def state(token: str = Depends(verify_auth_and_rate_limit)):
+    async with db_semaphore:
+        return env_instance.state()
 
 def main():
     uvicorn.run("server.app:app", host="0.0.0.0", port=7860, reload=False)
