@@ -8,6 +8,7 @@ from typing import Dict, Any, Optional
 from fastapi import FastAPI, HTTPException, Request, Depends
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from starlette.exceptions import HTTPException as StarletteHTTPException
 from pydantic import BaseModel
 import uvicorn
 
@@ -61,6 +62,11 @@ async def verify_auth_and_rate_limit(credentials: HTTPAuthorizationCredentials =
 app = FastAPI(title="OpenEnv SQL Data Engineer")
 db_semaphore = asyncio.Semaphore(5)
 
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"Unhandled exception: {str(exc)}")
+    return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
+
 @app.middleware("http")
 async def security_middleware(request: Request, call_next):
     # Max payload limit ~ 1MB
@@ -73,9 +79,6 @@ async def security_middleware(request: Request, call_next):
         return response
     except asyncio.TimeoutError:
         return JSONResponse(status_code=504, content={"error": "Gateway Timeout"})
-    except Exception as e:
-        logger.error(f"Unhandled exception: {str(e)}")
-        return JSONResponse(status_code=500, content={"error": "Internal Server Error"})
 
 class SQLEnvironment:
     def __init__(self):
@@ -246,11 +249,19 @@ class ResetRequest(BaseModel):
     task_id: int = 1
 
 @app.post("/reset", response_model=ResetResult)
-async def reset(req: ResetRequest, token: str = Depends(verify_auth_and_rate_limit)):
+async def reset(request: Request):
+    task_id = 1
+    try:
+        data = await request.json()
+        if "task_id" in data:
+            task_id = int(data["task_id"])
+    except:
+        pass # gracefully handle missing json body (curl -d '{}')
+
     async with db_semaphore:
         try:
-            logger.info(f"Resetting environment for task_id: {req.task_id}")
-            return env_instance.reset(task_id=req.task_id)
+            logger.info(f"Resetting environment for task_id: {task_id}")
+            return env_instance.reset(task_id=task_id)
         except Exception as e:
             logger.error(f"Reset Error: {str(e)}")
             raise HTTPException(status_code=400, detail="Error during reset")
