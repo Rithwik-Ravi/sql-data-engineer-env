@@ -39,7 +39,7 @@ class EasyTask(Task):
             # Check if view exists
             c.execute("SELECT name FROM sqlite_master WHERE type='view' AND name='high_value_customers'")
             if not c.fetchone():
-                return 0.0
+                return 0.01
             
             # Check rows
             c.execute("SELECT name, total_spent FROM high_value_customers ORDER BY name")
@@ -50,10 +50,10 @@ class EasyTask(Task):
                 
             expected = [("Bob", 1200.0), ("Diana", 3000.0), ("Eve", 1000.01)]
             if rows == expected:
-                return 1.0
+                return 0.99
             return 0.5
         except Exception:
-            return 0.0
+            return 0.01
 
 
 class MediumTask(Task):
@@ -107,9 +107,9 @@ class MediumTask(Task):
             correct_cats = sum(1 for c, e in zip(categories, expected_cats) if c == e)
             score += (correct_cats / 5.0) * 0.3 # up to 0.3 for correct categories
             
-            return min(1.0, score)
+            return min(max(score, 0.01), 0.99)
         except Exception:
-            return score
+            return min(max(score, 0.01), 0.99)
 
 
 class HardTask(Task):
@@ -160,7 +160,7 @@ class HardTask(Task):
             if 'appointments' in tables: score += 0.2
             
             if score < 0.4:
-                return score
+                return max(0.01, score)
                 
             # Check data counts (3 unique patients, 2 unique doctors, 4 appointments)
             c.execute("SELECT COUNT(*) FROM patients")
@@ -185,9 +185,9 @@ class HardTask(Task):
             if len(reconstructed) == 4:
                 score += 0.3
                 
-            return min(1.0, score)
+            return min(max(score, 0.01), 0.99)
         except Exception:
-            return score
+            return min(max(score, 0.01), 0.99)
 
 TASKS = {
     1: EasyTask(),

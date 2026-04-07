@@ -137,7 +137,8 @@ def run_task(task_id: int):
         if done:
             break
 
-    success_str = "true" if final_score >= 1.0 else "false"
+    final_score = max(0.01, min(0.99, final_score))
+    success_str = "true" if final_score >= 0.99 else "false"
     rewards_str = ",".join(rewards)
     print(f"[END] success={success_str} steps={step_count} score={final_score:.2f} rewards={rewards_str}")
     

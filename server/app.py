@@ -215,8 +215,8 @@ class SQLEnvironment:
             
         self.current_score = new_score
         
-        # Episode terminates when score is 1.0
-        done = (self.current_score >= 1.0) or (self.step_count > 30)
+        # Episode terminates when score is 0.99
+        done = (self.current_score >= 0.99) or (self.step_count > 30)
         
         obs = Observation(
             goal=task.get_goal(),
